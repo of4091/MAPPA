@@ -1,0 +1,13 @@
+# Pliki tymczasowe / cache
+cache_mechanicy.csv
+__pycache__/
+*.pyc
+
+# Folder z danymi lokalnymi (Excel)
+MAPPA_Dane/
+
+# Assety binarne — potrzebne (logo w nagłówku)
+
+# Środowisko
+.env
+*.log
