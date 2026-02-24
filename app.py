@@ -367,6 +367,8 @@ def load_maszyny(sheet_name: str) -> pd.DataFrame:
     result = df[[kost_col, count_col]].copy()
     result.columns = ["KOST", "ilosc"]
     result["KOST"] = result["KOST"].astype(str).str.strip()
+    # Normalizacja: "1250.0" → "1250" (pandas parsuje czysto-liczbowe kolumny jako float)
+    result["KOST"] = result["KOST"].str.replace(r'^(\d+)\.0$', r'\1', regex=True)
     result = result[result["KOST"].notna() & (result["KOST"] != "") & (result["KOST"] != "nan")]
     result["ilosc"] = pd.to_numeric(result["ilosc"], errors="coerce").fillna(0).astype(int)
     return result
@@ -377,7 +379,10 @@ def count_machines_for_budowa(kost_str, maszyny_male_df, maszyny_duze_df):
     """Zlicz maszyny małe i duże dla budowy wg KOST (może być kilka po przecinku)."""
     if not kost_str or str(kost_str).strip() in ("", "nan", "None"):
         return 0, 0
+    import re
     kosty = [k.strip().upper() for k in str(kost_str).split(",")]
+    # Normalizacja: "1250.0" → "1250" (na wypadek gdyby budowy też miały float KOST)
+    kosty = [re.sub(r'^(\d+)\.0$', r'\1', k) for k in kosty]
     male = 0
     duze = 0
     if not maszyny_male_df.empty:
