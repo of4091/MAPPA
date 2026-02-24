@@ -1078,6 +1078,18 @@ def main():
         budowy_df["maszyny_male"] = None
         budowy_df["maszyny_duze"] = None
 
+    # DEBUG — do usunięcia po naprawie
+    with st.expander("🔍 DEBUG maszyny", expanded=False):
+        st.write(f"**MALE**: {len(maszyny_male_df)} wierszy, empty={maszyny_male_df.empty}")
+        if not maszyny_male_df.empty:
+            st.dataframe(maszyny_male_df)
+        st.write(f"**DUZE**: {len(maszyny_duze_df)} wierszy, empty={maszyny_duze_df.empty}")
+        if not maszyny_duze_df.empty:
+            st.dataframe(maszyny_duze_df)
+        st.write("**Budowy po enrichmencie:**")
+        if not budowy_df.empty:
+            st.dataframe(budowy_df[["nazwa", "kost", "maszyny_male", "maszyny_duze"]])
+
     if "mechanicy_df" not in st.session_state:
         with st.spinner("📂 Wczytywanie i geokodowanie mechaników…"):
             st.session_state["mechanicy_df"] = load_mechanicy()
@@ -1481,7 +1493,7 @@ def main():
         st.markdown("### 📊 Analiza Dojazdów")
 
         if result_df is not None and not result_df.empty:
-            display_df = result_df.drop(columns=["_polyline", "_is_workshop"], errors="ignore")
+            display_df = result_df.drop(columns=["_polyline", "_is_workshop", "Warsztat"], errors="ignore")
             ws_flags = result_df["_is_workshop"].tolist() if "_is_workshop" in result_df.columns else None
 
             # Najlepszy wynik
@@ -1521,11 +1533,18 @@ def main():
             # Breakdown per warsztat
             st.markdown("---")
             st.markdown("#### 🔧 Podział wg warsztatów")
-            ws_summary = display_df.groupby("Warsztat").agg(
-                Mechaników=("Mechanik", "count"),
-                Śr_dystans_km=("Dystans (km)", "mean"),
-                Śr_koszt_PLN=("Koszt paliwa (PLN)", "mean"),
-            ).round(1).reset_index()
+            # Warsztat jest w result_df (nie w display_df bo usunięty)
+            ws_df = result_df.drop(columns=["_polyline", "_is_workshop"], errors="ignore")
+            suma_col = [c for c in ws_df.columns if "SUMA" in str(c)]
+            agg_dict = {
+                "Mechaników": ("Mechanik", "count"),
+                "Śr_dystans_km": ("Dystans (km)", "mean"),
+            }
+            if suma_col:
+                agg_dict["Śr_koszt_łączny_PLN"] = (suma_col[0], "mean")
+            else:
+                agg_dict["Śr_koszt_PLN"] = ("Koszt paliwa (PLN)", "mean")
+            ws_summary = ws_df.groupby("Warsztat").agg(**agg_dict).round(1).reset_index()
             st.markdown(_render_table(ws_summary), unsafe_allow_html=True)
 
         elif dest_name and analysis_mechanicy.empty:
