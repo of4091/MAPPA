@@ -331,38 +331,57 @@ def load_maszyny(sheet_name: str) -> pd.DataFrame:
     except Exception:
         return pd.DataFrame(columns=["KOST", "ilosc"])
 
-    # Kolumna B = KOST, Kolumna D = Liczba numerów inw.
+    cols = list(df.columns)
+
+    # Szukaj kolumny KOST — najpierw dokładne dopasowanie, potem zawiera
     kost_col = None
-    count_col = None
-    for c in df.columns:
-        cu = str(c).upper().strip()
-        if "KOST" in cu and kost_col is None:
+    for c in cols:
+        if str(c).strip().upper() == "KOST":
             kost_col = c
-        if ("LICZBA" in cu or "NUMER" in cu or "INW" in cu) and count_col is None:
+            break
+    if kost_col is None:
+        for c in cols:
+            if "KOST" in str(c).upper() and "NAZWA" not in str(c).upper():
+                kost_col = c
+                break
+
+    # Szukaj kolumny z liczbą — "LICZBA" lub "INW"
+    count_col = None
+    for c in cols:
+        cu = str(c).upper()
+        if "LICZBA" in cu or "INW" in cu:
             count_col = c
+            break
+
+    # Fallback: B=indeks 1, D=indeks 3
+    if kost_col is None and len(cols) >= 2:
+        kost_col = cols[1]
+    if count_col is None and len(cols) >= 4:
+        count_col = cols[3]
+
     if kost_col is None or count_col is None:
-        # Fallback: kolumna B (indeks 1) i D (indeks 3)
-        cols = list(df.columns)
-        if len(cols) >= 4:
-            kost_col = cols[1]
-            count_col = cols[3]
-        else:
-            return pd.DataFrame(columns=["KOST", "ilosc"])
+        return pd.DataFrame(columns=["KOST", "ilosc"])
 
     result = df[[kost_col, count_col]].copy()
     result.columns = ["KOST", "ilosc"]
     result["KOST"] = result["KOST"].astype(str).str.strip()
+    result = result[result["KOST"].notna() & (result["KOST"] != "") & (result["KOST"] != "nan")]
     result["ilosc"] = pd.to_numeric(result["ilosc"], errors="coerce").fillna(0).astype(int)
     return result
+
 
 
 def count_machines_for_budowa(kost_str, maszyny_male_df, maszyny_duze_df):
     """Zlicz maszyny małe i duże dla budowy wg KOST (może być kilka po przecinku)."""
     if not kost_str or str(kost_str).strip() in ("", "nan", "None"):
-        return None, None
-    kosty = [k.strip() for k in str(kost_str).split(",")]
-    male = int(maszyny_male_df[maszyny_male_df["KOST"].isin(kosty)]["ilosc"].sum())
-    duze = int(maszyny_duze_df[maszyny_duze_df["KOST"].isin(kosty)]["ilosc"].sum())
+        return 0, 0
+    kosty = [k.strip().upper() for k in str(kost_str).split(",")]
+    male = 0
+    duze = 0
+    if not maszyny_male_df.empty:
+        male = int(maszyny_male_df[maszyny_male_df["KOST"].str.upper().isin(kosty)]["ilosc"].sum())
+    if not maszyny_duze_df.empty:
+        duze = int(maszyny_duze_df[maszyny_duze_df["KOST"].str.upper().isin(kosty)]["ilosc"].sum())
     return male, duze
 
 
@@ -393,7 +412,12 @@ def load_mechanicy() -> pd.DataFrame:
             warsztat = str(row.get("Warsztat", "")).strip()
 
             # Sprawdź opcjonalną kolumnę WSPÓŁRZĘDNE (np. "50.123, 19.456")
-            coords_raw = row.get("WSPÓŁRZĘDNE", row.get("WSPOLRZEDNE", row.get("Współrzędne", "")))
+            coords_raw = ""
+            for col_name in df.columns:
+                cn = str(col_name).upper().strip()
+                if "SP" in cn and "RZ" in cn:  # WSPÓŁRZĘDNE / WSPOLRZEDNE
+                    coords_raw = row.get(col_name, "")
+                    break
             coords_str = str(coords_raw).strip() if pd.notna(coords_raw) else ""
             lat, lon = None, None
 
@@ -478,12 +502,15 @@ def haversine_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
 # ── C7: Sprawdzenie dostępności OSRM ─────────────────────────────────────────
 def check_osrm_available() -> bool:
     """Testowe zapytanie do OSRM — sprawdza czy serwer odpowiada."""
-    try:
-        url = f"{OSRM_BASE}/19.945,50.065;20.0,50.0?overview=false"
-        resp = requests.get(url, timeout=5)
-        return resp.status_code == 200 and resp.json().get("code") == "Ok"
-    except Exception:
-        return False
+    url = f"{OSRM_BASE}/19.945,50.065;20.0,50.0?overview=false"
+    for _ in range(2):  # 2 próby
+        try:
+            resp = requests.get(url, timeout=8)
+            if resp.status_code == 200 and resp.json().get("code") == "Ok":
+                return True
+        except Exception:
+            pass
+    return False
 
 
 # ── OSRM Routing (z geometrią trasy) ────────────────────────────────────────
@@ -628,28 +655,24 @@ def build_map(mechanicy_df, budowy_df, warsztaty_df,
     fg_budowy = folium.FeatureGroup(name="🏢 Budowy", show=show_budowy)
     if budowy_df is not None and not budowy_df.empty:
         for _, row in budowy_df.iterrows():
-            m_male = row.get("maszyny_male")
-            m_duze = row.get("maszyny_duze")
-            maszyny_info = ""
-            if m_male is not None or m_duze is not None:
-                maszyny_info = (
-                    f"<br><span style='color:#555'>🔩 Maszyny duże: <b>{m_duze if m_duze is not None else '?'}</b></span>"
-                    f"<br><span style='color:#555'>🔧 Maszyny małe: <b>{m_male if m_male is not None else '?'}</b></span>"
-                )
-            else:
-                maszyny_info = "<br><span style='color:#999; font-size:0.85em'>Brak danych o maszynach</span>"
+            m_male = row.get("maszyny_male", 0)
+            m_duze = row.get("maszyny_duze", 0)
+            m_male = int(m_male) if pd.notna(m_male) else 0
+            m_duze = int(m_duze) if pd.notna(m_duze) else 0
             popup_html = (
                 f"<div style='min-width:180px'>"
                 f"<b style='color:#c0392b; font-size:1.05em'>🏢 {row['nazwa']}</b><br>"
                 f"<span style='color:#555'>KOST: <b>{row['kost']}</b></span>"
-                f"{maszyny_info}"
+                f"<br><span style='color:#555'>🔩 Duże: <b>{m_duze}</b></span>"
+                f"<br><span style='color:#555'>🔧 Małe: <b>{m_male}</b></span>"
                 f"</div>"
             )
+            tooltip_text = f"{row['nazwa']} | D:{m_duze} M:{m_male}"
             icon_color = "darkred" if (selected_budowa and row["nazwa"] == selected_budowa) else "red"
             folium.Marker(
                 location=[row["lat"], row["lon"]],
                 popup=folium.Popup(popup_html, max_width=280),
-                tooltip=row["nazwa"],
+                tooltip=tooltip_text,
                 icon=folium.Icon(color=icon_color, icon="industry", prefix="fa"),
             ).add_to(fg_budowy)
     fg_budowy.add_to(m)
@@ -1045,7 +1068,7 @@ def main():
         maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE")
 
     # Wzbogać budowy o liczbę maszyn
-    if not budowy_df.empty and not maszyny_male_df.empty:
+    if not budowy_df.empty and (not maszyny_male_df.empty or not maszyny_duze_df.empty):
         budowy_df[["maszyny_male", "maszyny_duze"]] = budowy_df["kost"].apply(
             lambda k: pd.Series(count_machines_for_budowa(k, maszyny_male_df, maszyny_duze_df))
         )
@@ -1275,9 +1298,10 @@ def main():
 
     st.markdown("")
 
-    # ── C7: Sprawdź dostępność OSRM ──────────────────────────────────────
+    # ── C7: Sprawdź dostępność OSRM (tylko raz na sesję, nie przy odświeżaniu danych)
     if "osrm_available" not in st.session_state:
-        st.session_state["osrm_available"] = check_osrm_available()
+        with st.spinner("🌐 Sprawdzanie połączenia OSRM…"):
+            st.session_state["osrm_available"] = check_osrm_available()
     osrm_down = not st.session_state["osrm_available"]
     if osrm_down:
         st.warning(
@@ -1415,15 +1439,7 @@ def main():
             all_mechanicy_df=mechanicy_df,
         )
         # Kliknięcie na budowę → automatycznie ustawia cel
-        map_data = st_folium(fmap, use_container_width=True, height=580,
-                             returned_objects=["last_object_clicked_tooltip"])
-        if map_data and map_data.get("last_object_clicked_tooltip"):
-            clicked_tip = map_data["last_object_clicked_tooltip"]
-            # Sprawdź czy to budowa
-            budowa_names = budowy_df["nazwa"].tolist() if not budowy_df.empty else []
-            if clicked_tip in budowa_names and clicked_tip != st.session_state.get("_map_selected_budowa"):
-                st.session_state["_map_selected_budowa"] = clicked_tip
-                st.rerun()
+        st_folium(fmap, use_container_width=True, height=580, returned_objects=[])
 
         # Legenda tras (pod mapą)
         if routes_for_map:
