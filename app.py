@@ -326,12 +326,12 @@ def load_warsztaty() -> pd.DataFrame:
 # ── Ładowanie maszyn ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=300)
 def load_maszyny(sheet_name: str) -> pd.DataFrame:
-    """Wczytaj listę maszyn z Google Sheets. Zwraca DataFrame z kolumnami KOST, ilosc."""
+    """Wczytaj listę maszyn z Google Sheets. Zwraca DataFrame z kolumnami KOST, nazwa_kost, ilosc."""
     try:
         url = gsheet_csv_url(sheet_name)
         df = pd.read_csv(url)
     except Exception:
-        return pd.DataFrame(columns=["KOST", "ilosc"])
+        return pd.DataFrame(columns=["KOST", "nazwa_kost", "ilosc"])
 
     cols = list(df.columns)
 
@@ -346,6 +346,14 @@ def load_maszyny(sheet_name: str) -> pd.DataFrame:
             if "KOST" in str(c).upper() and "NAZWA" not in str(c).upper():
                 kost_col = c
                 break
+
+    # Szukaj kolumny "Ostatnie: Nazwa KOST" (lub warianty)
+    nazwa_kost_col = None
+    for c in cols:
+        cu = str(c).upper().strip()
+        if "NAZWA" in cu and "KOST" in cu:
+            nazwa_kost_col = c
+            break
 
     # Szukaj kolumny z liczbą — "LICZBA" lub "INW"
     count_col = None
@@ -362,15 +370,32 @@ def load_maszyny(sheet_name: str) -> pd.DataFrame:
         count_col = cols[3]
 
     if kost_col is None or count_col is None:
-        return pd.DataFrame(columns=["KOST", "ilosc"])
+        return pd.DataFrame(columns=["KOST", "nazwa_kost", "ilosc"])
 
-    result = df[[kost_col, count_col]].copy()
-    result.columns = ["KOST", "ilosc"]
+    # Zbierz kolumny do wyniku
+    use_cols = [kost_col, count_col]
+    out_names = ["KOST", "ilosc"]
+    if nazwa_kost_col:
+        use_cols = [kost_col, nazwa_kost_col, count_col]
+        out_names = ["KOST", "nazwa_kost", "ilosc"]
+
+    result = df[use_cols].copy()
+    result.columns = out_names
+
     result["KOST"] = result["KOST"].astype(str).str.strip()
     # Normalizacja: "1250.0" → "1250" (pandas parsuje czysto-liczbowe kolumny jako float)
     result["KOST"] = result["KOST"].str.replace(r'^(\d+)\.0$', r'\1', regex=True)
-    result = result[result["KOST"].notna() & (result["KOST"] != "") & (result["KOST"] != "nan")]
+
+    if "nazwa_kost" not in result.columns:
+        result["nazwa_kost"] = ""
+    else:
+        result["nazwa_kost"] = result["nazwa_kost"].astype(str).str.strip()
+        result.loc[result["nazwa_kost"] == "nan", "nazwa_kost"] = ""
+
+    # NIE filtruj pustych KOST — zostawiamy je, żeby potem uzupełnić cross-referencją
     result["ilosc"] = pd.to_numeric(result["ilosc"], errors="coerce").fillna(0).astype(int)
+    # Filtruj wiersze, które mają zarówno pusty KOST jak i pustą nazwę
+    result = result[~((result["KOST"].isin(["", "nan"])) & (result["nazwa_kost"] == ""))]
     return result
 
 
@@ -1071,8 +1096,45 @@ def main():
         warsztaty_df = load_warsztaty()
 
     with st.spinner("📂 Wczytywanie list maszyn…"):
-        maszyny_male_df = load_maszyny("LISTA_MASZYN_MALE")
-        maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE")
+        maszyny_male_df = load_maszyny("LISTA_MASZYN_MALE").copy()
+        maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE").copy()
+
+    # ── Cross-referencja: uzupełnij puste KOST w DUZE na podstawie MALE ──
+    # DUZE sheet ma wiele wierszy z pustym KOST ale z "Ostatnie: Nazwa KOST"
+    # np. "S1 ODC1A BIERUŃ-OŚWI" → w MALE ten sam rekord ma KOST = "HTSA"
+    if not maszyny_male_df.empty and not maszyny_duze_df.empty:
+        if "nazwa_kost" in maszyny_male_df.columns and "nazwa_kost" in maszyny_duze_df.columns:
+            # Buduj mapowanie: nazwa_kost → KOST (z MALE, gdzie KOST nie jest pusty)
+            male_valid = maszyny_male_df[
+                (maszyny_male_df["KOST"].notna()) &
+                (~maszyny_male_df["KOST"].isin(["", "nan"])) &
+                (maszyny_male_df["nazwa_kost"] != "")
+            ]
+            nazwa_to_kost = dict(zip(
+                male_valid["nazwa_kost"].str.upper(),
+                male_valid["KOST"]
+            ))
+
+            # Uzupełnij puste KOST w DUZE
+            mask_empty = maszyny_duze_df["KOST"].isin(["", "nan"])
+            filled = 0
+            for idx in maszyny_duze_df[mask_empty].index:
+                nk = str(maszyny_duze_df.at[idx, "nazwa_kost"]).upper()
+                if nk in nazwa_to_kost:
+                    maszyny_duze_df.at[idx, "KOST"] = nazwa_to_kost[nk]
+                    filled += 1
+
+    # Teraz filtruj wiersze z pustym KOST (nie da się zmatchować)
+    if not maszyny_male_df.empty:
+        maszyny_male_df = maszyny_male_df[
+            maszyny_male_df["KOST"].notna() &
+            (~maszyny_male_df["KOST"].isin(["", "nan"]))
+        ].copy()
+    if not maszyny_duze_df.empty:
+        maszyny_duze_df = maszyny_duze_df[
+            maszyny_duze_df["KOST"].notna() &
+            (~maszyny_duze_df["KOST"].isin(["", "nan"]))
+        ].copy()
 
     # Wzbogać budowy o liczbę maszyn
     if not budowy_df.empty and (not maszyny_male_df.empty or not maszyny_duze_df.empty):
