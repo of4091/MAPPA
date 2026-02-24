@@ -321,6 +321,51 @@ def load_warsztaty() -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+# ── Ładowanie maszyn ─────────────────────────────────────────────────────────
+@st.cache_data(show_spinner=False, ttl=300)
+def load_maszyny(sheet_name: str) -> pd.DataFrame:
+    """Wczytaj listę maszyn z Google Sheets. Zwraca DataFrame z kolumnami KOST, ilosc."""
+    try:
+        url = gsheet_csv_url(sheet_name)
+        df = pd.read_csv(url)
+    except Exception:
+        return pd.DataFrame(columns=["KOST", "ilosc"])
+
+    # Kolumna B = KOST, Kolumna D = Liczba numerów inw.
+    kost_col = None
+    count_col = None
+    for c in df.columns:
+        cu = str(c).upper().strip()
+        if "KOST" in cu and kost_col is None:
+            kost_col = c
+        if ("LICZBA" in cu or "NUMER" in cu or "INW" in cu) and count_col is None:
+            count_col = c
+    if kost_col is None or count_col is None:
+        # Fallback: kolumna B (indeks 1) i D (indeks 3)
+        cols = list(df.columns)
+        if len(cols) >= 4:
+            kost_col = cols[1]
+            count_col = cols[3]
+        else:
+            return pd.DataFrame(columns=["KOST", "ilosc"])
+
+    result = df[[kost_col, count_col]].copy()
+    result.columns = ["KOST", "ilosc"]
+    result["KOST"] = result["KOST"].astype(str).str.strip()
+    result["ilosc"] = pd.to_numeric(result["ilosc"], errors="coerce").fillna(0).astype(int)
+    return result
+
+
+def count_machines_for_budowa(kost_str, maszyny_male_df, maszyny_duze_df):
+    """Zlicz maszyny małe i duże dla budowy wg KOST (może być kilka po przecinku)."""
+    if not kost_str or str(kost_str).strip() in ("", "nan", "None"):
+        return None, None
+    kosty = [k.strip() for k in str(kost_str).split(",")]
+    male = int(maszyny_male_df[maszyny_male_df["KOST"].isin(kosty)]["ilosc"].sum())
+    duze = int(maszyny_duze_df[maszyny_duze_df["KOST"].isin(kosty)]["ilosc"].sum())
+    return male, duze
+
+
 def load_mechanicy() -> pd.DataFrame:
     """Wczytaj arkusz MECHANICY z Google Sheets — geokoduj z cache."""
     try:
@@ -347,26 +392,44 @@ def load_mechanicy() -> pd.DataFrame:
             miasto = str(row.get("Miasto", "")).strip()
             warsztat = str(row.get("Warsztat", "")).strip()
 
-            # A5: Ulica — użyj pd.notna() zamiast porównania z "nan"
-            ulica_raw = row.get("Ulica", "")
-            ulica = str(ulica_raw).strip() if pd.notna(ulica_raw) else ""
+            # Sprawdź opcjonalną kolumnę WSPÓŁRZĘDNE (np. "50.123, 19.456")
+            coords_raw = row.get("WSPÓŁRZĘDNE", row.get("WSPOLRZEDNE", row.get("Współrzędne", "")))
+            coords_str = str(coords_raw).strip() if pd.notna(coords_raw) else ""
+            lat, lon = None, None
 
-            # A5: Budowanie adresu — z pd.notna() zamiast string check
-            addr_parts = []
-            for p in [ulica, kod, miasto]:
-                if pd.notna(p) and str(p).strip() and str(p).strip().lower() != "nan":
-                    addr_parts.append(str(p).strip())
-            adres = " ".join(addr_parts)
+            if coords_str and coords_str.lower() != "nan":
+                try:
+                    parts = coords_str.split(",")
+                    if len(parts) == 2:
+                        lat = float(parts[0].strip())
+                        lon = float(parts[1].strip())
+                except (ValueError, IndexError):
+                    lat, lon = None, None
 
-            if not adres:
-                skipped_list.append(f"{imie} {nazwisko} (brak adresu)")
-                continue
+            # Jeśli brak współrzędnych — geokoduj po adresie
+            if lat is None or lon is None:
+                # A5: Ulica — użyj pd.notna() zamiast porównania z "nan"
+                ulica_raw = row.get("Ulica", "")
+                ulica = str(ulica_raw).strip() if pd.notna(ulica_raw) else ""
 
-            was_cached = adres in cache
-            lat, lon = geocode_address(adres, geolocator, cache)
+                # A5: Budowanie adresu — z pd.notna() zamiast string check
+                addr_parts = []
+                for p in [ulica, kod, miasto]:
+                    if pd.notna(p) and str(p).strip() and str(p).strip().lower() != "nan":
+                        addr_parts.append(str(p).strip())
+                adres = " ".join(addr_parts)
 
-            if not was_cached and lat is not None:
-                new_geocoded += 1
+                if not adres:
+                    skipped_list.append(f"{imie} {nazwisko} (brak adresu i współrzędnych)")
+                    continue
+
+                was_cached = adres in cache
+                lat, lon = geocode_address(adres, geolocator, cache)
+
+                if not was_cached and lat is not None:
+                    new_geocoded += 1
+            else:
+                adres = coords_str  # Współrzędne jako "adres" w danych
 
             if lat is not None and lon is not None:
                 rows.append({
@@ -505,12 +568,39 @@ TILE_PROVIDERS = {
 }
 
 
+# ── Offset tras (przesunięcie boczne) ────────────────────────────────────────
+def offset_polyline(coords, offset_meters, route_index):
+    """Przesuń polilinię w bok o offset_meters × route_index.
+    Daje efekt 'wielokolorowej' trasy zamiast nakładania się."""
+    if not coords or len(coords) < 2 or route_index == 0:
+        return coords
+    import math
+    # Przelicznik: 1 stopień ≈ 111 000 m
+    offset_deg = (offset_meters * route_index) / 111000.0
+    result = []
+    for j in range(len(coords)):
+        lat, lon = coords[j]
+        if j < len(coords) - 1:
+            dlat = coords[j + 1][0] - lat
+            dlon = coords[j + 1][1] - lon
+        else:
+            dlat = lat - coords[j - 1][0]
+            dlon = lon - coords[j - 1][1]
+        length = math.sqrt(dlat ** 2 + dlon ** 2) or 1e-10
+        # Wektor prostopadły (w prawo)
+        perp_lat = -dlon / length
+        perp_lon = dlat / length
+        result.append([lat + perp_lat * offset_deg, lon + perp_lon * offset_deg])
+    return result
+
+
 # ── Mapa Folium ──────────────────────────────────────────────────────────────
 def build_map(mechanicy_df, budowy_df, warsztaty_df,
               selected_budowa=None, routes=None,
               tile_key="🌍 OpenStreetMap", use_clusters=True,
               show_budowy=True, show_warsztaty=True,
-              show_mechanicy=True, show_trasy=True):
+              show_mechanicy=True, show_trasy=True,
+              all_mechanicy_df=None):
     """Zbuduj mapę Folium z warstwami i opcjonalnymi trasami."""
     all_lats, all_lons = [], []
     for df in [mechanicy_df, budowy_df, warsztaty_df]:
@@ -538,10 +628,21 @@ def build_map(mechanicy_df, budowy_df, warsztaty_df,
     fg_budowy = folium.FeatureGroup(name="🏢 Budowy", show=show_budowy)
     if budowy_df is not None and not budowy_df.empty:
         for _, row in budowy_df.iterrows():
+            m_male = row.get("maszyny_male")
+            m_duze = row.get("maszyny_duze")
+            maszyny_info = ""
+            if m_male is not None or m_duze is not None:
+                maszyny_info = (
+                    f"<br><span style='color:#555'>🔩 Maszyny duże: <b>{m_duze if m_duze is not None else '?'}</b></span>"
+                    f"<br><span style='color:#555'>🔧 Maszyny małe: <b>{m_male if m_male is not None else '?'}</b></span>"
+                )
+            else:
+                maszyny_info = "<br><span style='color:#999; font-size:0.85em'>Brak danych o maszynach</span>"
             popup_html = (
                 f"<div style='min-width:180px'>"
                 f"<b style='color:#c0392b; font-size:1.05em'>🏢 {row['nazwa']}</b><br>"
                 f"<span style='color:#555'>KOST: <b>{row['kost']}</b></span>"
+                f"{maszyny_info}"
                 f"</div>"
             )
             icon_color = "darkred" if (selected_budowa and row["nazwa"] == selected_budowa) else "red"
@@ -556,17 +657,24 @@ def build_map(mechanicy_df, budowy_df, warsztaty_df,
     # ── Warstwa: Warsztaty (niebieskie) ──────────────────────────────────
     fg_warsztaty = folium.FeatureGroup(name="🔧 Warsztaty", show=show_warsztaty)
     if warsztaty_df is not None and not warsztaty_df.empty:
+        # Policz mechaników per warsztat
+        mech_src = all_mechanicy_df if all_mechanicy_df is not None else mechanicy_df
+        ws_counts = {}
+        if mech_src is not None and not mech_src.empty and "warsztat" in mech_src.columns:
+            ws_counts = mech_src["warsztat"].value_counts().to_dict()
         for _, row in warsztaty_df.iterrows():
+            n_mech = ws_counts.get(row["nazwa"], 0)
             popup_html = (
                 f"<div style='min-width:160px'>"
                 f"<b style='color:#2980b9; font-size:1.05em'>🔧 {row['nazwa']}</b><br>"
+                f"<span style='color:#555'>👷 Mechaników: <b>{n_mech}</b></span><br>"
                 f"<span style='color:#777; font-size:0.85em'>Warsztat stały</span>"
                 f"</div>"
             )
             folium.Marker(
                 location=[row["lat"], row["lon"]],
                 popup=folium.Popup(popup_html, max_width=250),
-                tooltip=row["nazwa"],
+                tooltip=f"{row['nazwa']} ({n_mech} mech.)",
                 icon=folium.Icon(color="blue", icon="wrench", prefix="fa"),
             ).add_to(fg_warsztaty)
     fg_warsztaty.add_to(m)
@@ -600,21 +708,27 @@ def build_map(mechanicy_df, budowy_df, warsztaty_df,
             label = route_info.get("label", "")
             dist = route_info.get("dist", "")
             dur = route_info.get("dur", "")
-            color = get_route_color(i)
+            is_ws = route_info.get("is_workshop", False)
+            color = "#f97316" if is_ws else get_route_color(i)
             is_best = route_info.get("is_best", False)
             rank = f"#{i+1}"
             best_star = " ⭐" if is_best else ""
+            ws_tag = " 🔧" if is_ws else ""
 
             weight = 7 if is_best else 4
             opacity = 0.9 if is_best else 0.75
+            dash_array = "10 6" if is_ws else None
 
             if polyline and len(polyline) > 1:
+                # Przesuń trasę w bok aby nie nakładały się
+                display_polyline = offset_polyline(polyline, 30, i)
                 folium.PolyLine(
-                    locations=polyline,
+                    locations=display_polyline,
                     color=color,
                     weight=weight,
                     opacity=opacity,
-                    tooltip=f"{rank} {label} — {dist} km, {dur} min{best_star}",
+                    dash_array=dash_array,
+                    tooltip=f"{rank} {label} — {dist} km, {dur} min{best_star}{ws_tag}",
                 ).add_to(fg_trasy)
 
                 # Kolorowy CircleMarker na początku trasy (skaluje się z zoomem)
@@ -878,36 +992,43 @@ def main():
         """, unsafe_allow_html=True)
 
     # ── Helper: renderuj DataFrame jako tabelę HTML ─────────────────
-    def _render_table(df, highlight_row=None):
-        """Pełna kontrola kolorów — st.dataframe używa canvas i CSS go nie obejmie."""
+    def _render_table(df, highlight_row=None, workshop_flags=None):
+        """Pełna kontrola kolorów — st.dataframe używa canvas i CSS go nie obejmie.
+        workshop_flags: opcjonalna lista bool, True = wiersz warsztatu (pomarańczowy)."""
         dk = dark_mode
         bg     = "#1e293b" if dk else "#ffffff"
         txt    = "#e2e8f0" if dk else "#1e293b"
         hd_bg  = "#0f172a" if dk else "#e2e8f0"
         brd    = "rgba(148,163,184,0.15)" if dk else "rgba(0,0,0,0.08)"
         alt_bg = "rgba(255,255,255,0.03)" if dk else "rgba(0,0,0,0.02)"
+        ws_bg  = "rgba(249,115,22,0.2)" if dk else "rgba(249,115,22,0.12)"
+        # Ukryj kolumny zaczynające się od _
+        visible_cols = [c for c in df.columns if not str(c).startswith("_")]
         html = (f'<div style="overflow-x:auto;border-radius:12px;'
                 f'border:1px solid {brd};margin:0.5rem 0">'
                 f'<table style="width:100%;border-collapse:collapse;'
                 f'background:{bg};color:{txt};font-size:0.85rem">')
         html += '<thead><tr>'
-        for col in df.columns:
+        for col in visible_cols:
             html += (f'<th style="padding:8px 12px;background:{hd_bg};'
                      f'border-bottom:2px solid {brd};text-align:left;'
                      f'font-weight:600;white-space:nowrap">{col}</th>')
         html += '</tr></thead><tbody>'
         for i, (_, row) in enumerate(df.iterrows()):
+            is_ws = workshop_flags[i] if workshop_flags and i < len(workshop_flags) else False
             if highlight_row is not None and i == highlight_row:
                 rbg, rtxt, fw = "#1565c0", "#ffffff", "bold"
+            elif is_ws:
+                rbg, rtxt, fw = ws_bg, txt, "normal"
             elif i % 2 == 1:
                 rbg, rtxt, fw = alt_bg, txt, "normal"
             else:
                 rbg, rtxt, fw = bg, txt, "normal"
             html += f'<tr style="background:{rbg};color:{rtxt};font-weight:{fw}">'
-            for val in row:
+            for col in visible_cols:
                 html += (f'<td style="padding:6px 12px;'
                          f'border-bottom:1px solid {brd};'
-                         f'white-space:nowrap">{val}</td>')
+                         f'white-space:nowrap">{row[col]}</td>')
             html += '</tr>'
         html += '</tbody></table></div>'
         return html
@@ -918,6 +1039,19 @@ def main():
 
     with st.spinner("📂 Wczytywanie warsztatów…"):
         warsztaty_df = load_warsztaty()
+
+    with st.spinner("📂 Wczytywanie list maszyn…"):
+        maszyny_male_df = load_maszyny("LISTA_MASZYN_MALE")
+        maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE")
+
+    # Wzbogać budowy o liczbę maszyn
+    if not budowy_df.empty and not maszyny_male_df.empty:
+        budowy_df[["maszyny_male", "maszyny_duze"]] = budowy_df["kost"].apply(
+            lambda k: pd.Series(count_machines_for_budowa(k, maszyny_male_df, maszyny_duze_df))
+        )
+    else:
+        budowy_df["maszyny_male"] = None
+        budowy_df["maszyny_duze"] = None
 
     if "mechanicy_df" not in st.session_state:
         with st.spinner("📂 Wczytywanie i geokodowanie mechaników…"):
@@ -942,11 +1076,19 @@ def main():
             dest_options += ["🔧 " + n for n in warsztaty_df["nazwa"].tolist()]
 
         if dest_options:
+            # Jeśli kliknięto budowę na mapie, ustaw ją jako domyślny cel
+            default_idx = 0
+            map_pick = st.session_state.get("_map_selected_budowa")
+            if map_pick:
+                full_label = f"🏢 {map_pick}"
+                if full_label in dest_options:
+                    default_idx = dest_options.index(full_label)
             selected_dest = st.selectbox(
                 "📍 Miejsce docelowe",
                 options=dest_options,
-                index=0,
+                index=default_idx,
                 help="Wybierz budowę lub warsztat jako cel dojazdu.",
+                key="dest_selectbox",
             )
         else:
             selected_dest = None
@@ -1096,7 +1238,11 @@ def main():
 
     # ── Metryki proaktywne ───────────────────────────────────────────────
 
-    col_m1, col_m2, col_m3 = st.columns(3)
+    # Policz łączną liczbę maszyn
+    total_male = int(budowy_df["maszyny_male"].sum()) if "maszyny_male" in budowy_df.columns else 0
+    total_duze = int(budowy_df["maszyny_duze"].sum()) if "maszyny_duze" in budowy_df.columns else 0
+
+    col_m1, col_m2, col_m3, col_m4 = st.columns(4)
     with col_m1:
         st.markdown(
             f'<div class="metric-card">'
@@ -1119,6 +1265,13 @@ def main():
             f'<div class="label">Warsztaty</div></div>',
             unsafe_allow_html=True,
         )
+    with col_m4:
+        st.markdown(
+            f'<div class="metric-card">'
+            f'<div class="value">{total_duze + total_male}</div>'
+            f'<div class="label">Maszyny (D:{total_duze} M:{total_male})</div></div>',
+            unsafe_allow_html=True,
+        )
 
     st.markdown("")
 
@@ -1138,12 +1291,16 @@ def main():
     if analyze_clicked and dest_name and dest_lat is not None and not analysis_mechanicy.empty:
         results = []
 
+        # Zbierz warsztaty do analizy
+        ws_to_analyze = warsztaty_df if warsztaty_df is not None and not warsztaty_df.empty else pd.DataFrame()
+        total = len(analysis_mechanicy) + len(ws_to_analyze)
+
         progress_bar = st.progress(0, text="🛣️ Obliczanie tras OSRM…")
-        total = len(analysis_mechanicy)
+        idx = 0
 
-        for i, (_, mech) in enumerate(analysis_mechanicy.iterrows()):
+        # Mechanicy
+        for _, mech in analysis_mechanicy.iterrows():
             origin_lat, origin_lon = mech["lat"], mech["lon"]
-
             dist_km, dur_min, polyline = get_osrm_route(
                 origin_lat, origin_lon, dest_lat, dest_lon,
                 use_fallback=osrm_down,
@@ -1157,8 +1314,31 @@ def main():
                     "Czas (min)": dur_min,
                     "Koszt paliwa (PLN)": koszt,
                     "_polyline": polyline,
+                    "_is_workshop": False,
                 })
-            progress_bar.progress((i + 1) / total, text=f"🛣️ Trasa {i+1}/{total}")
+            idx += 1
+            progress_bar.progress(idx / total, text=f"🛣️ Trasa {idx}/{total}")
+
+        # Warsztaty
+        for _, ws in ws_to_analyze.iterrows():
+            origin_lat, origin_lon = ws["lat"], ws["lon"]
+            dist_km, dur_min, polyline = get_osrm_route(
+                origin_lat, origin_lon, dest_lat, dest_lon,
+                use_fallback=osrm_down,
+            )
+            if dist_km is not None:
+                koszt = round(dist_km * koszt_za_km, 2)
+                results.append({
+                    "Mechanik": f"🔧 {ws['nazwa']}",
+                    "Warsztat": ws["nazwa"],
+                    "Dystans (km)": dist_km,
+                    "Czas (min)": dur_min,
+                    "Koszt paliwa (PLN)": koszt,
+                    "_polyline": polyline,
+                    "_is_workshop": True,
+                })
+            idx += 1
+            progress_bar.progress(idx / total, text=f"🛣️ Trasa {idx}/{total} (warsztaty)")
 
         progress_bar.empty()
 
@@ -1176,6 +1356,7 @@ def main():
                         "dist": row["Dystans (km)"],
                         "dur": row["Czas (min)"],
                         "is_best": i == 0,
+                        "is_workshop": row.get("_is_workshop", False),
                     })
 
             # Zapisz wyniki do session_state
@@ -1231,9 +1412,18 @@ def main():
             show_warsztaty=show_warsztaty,
             show_mechanicy=show_mechanicy,
             show_trasy=show_trasy,
+            all_mechanicy_df=mechanicy_df,
         )
-        # returned_objects=[] → brak rerun przy zoom/pan mapy
-        st_folium(fmap, use_container_width=True, height=580, returned_objects=[])
+        # Kliknięcie na budowę → automatycznie ustawia cel
+        map_data = st_folium(fmap, use_container_width=True, height=580,
+                             returned_objects=["last_object_clicked_tooltip"])
+        if map_data and map_data.get("last_object_clicked_tooltip"):
+            clicked_tip = map_data["last_object_clicked_tooltip"]
+            # Sprawdź czy to budowa
+            budowa_names = budowy_df["nazwa"].tolist() if not budowy_df.empty else []
+            if clicked_tip in budowa_names and clicked_tip != st.session_state.get("_map_selected_budowa"):
+                st.session_state["_map_selected_budowa"] = clicked_tip
+                st.rerun()
 
         # Legenda tras (pod mapą)
         if routes_for_map:
@@ -1261,7 +1451,8 @@ def main():
         st.markdown("### 📊 Analiza Dojazdów")
 
         if result_df is not None and not result_df.empty:
-            display_df = result_df.drop(columns=["_polyline"])
+            display_df = result_df.drop(columns=["_polyline", "_is_workshop"], errors="ignore")
+            ws_flags = result_df["_is_workshop"].tolist() if "_is_workshop" in result_df.columns else None
 
             # Najlepszy wynik
             best = display_df.iloc[0]
@@ -1280,7 +1471,7 @@ def main():
             fmt_df["Dystans (km)"] = fmt_df["Dystans (km)"].apply(lambda x: f"{x:.1f}")
             fmt_df["Czas (min)"] = fmt_df["Czas (min)"].apply(lambda x: f"{x:.1f}")
             fmt_df["Koszt paliwa (PLN)"] = fmt_df["Koszt paliwa (PLN)"].apply(lambda x: f"{x:.2f}")
-            st.markdown(_render_table(fmt_df, highlight_row=0), unsafe_allow_html=True)
+            st.markdown(_render_table(fmt_df, highlight_row=0, workshop_flags=ws_flags), unsafe_allow_html=True)
 
             # Eksport CSV
             csv_data = display_df.to_csv(index=False, sep=";", decimal=",")
@@ -1318,7 +1509,7 @@ def main():
         chart_budowa = analysis_target or selected_budowa or ""
         st.markdown("---")
         st.markdown("### 📊 Wykres porównawczy")
-        chart_df = result_df.drop(columns=["_polyline"]).copy()
+        chart_df = result_df.drop(columns=["_polyline", "_is_workshop"], errors="ignore").copy()
         chart_metric = st.radio(
             "Metryka wykresu:",
             ["Dystans (km)", "Czas (min)", "Koszt paliwa (PLN)"],
