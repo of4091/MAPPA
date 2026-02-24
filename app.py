@@ -1565,10 +1565,11 @@ def main():
 
             # Najlepszy wynik
             best = display_df.iloc[0]
+            best_warsztat = result_df.iloc[0].get("Warsztat", "") if "Warsztat" in result_df.columns else ""
             st.markdown(
                 f'<div class="best-result">'
                 f'<h4>🏆 Najlepszy wybór</h4>'
-                f'<p><b>{best["Mechanik"]}</b> ({best["Warsztat"]})<br>'
+                f'<p><b>{best["Mechanik"]}</b> ({best_warsztat})<br>'
                 f'📏 {best["Dystans (km)"]} km &nbsp;·&nbsp; '
                 f'⏱️ {best["Czas (min)"]} min &nbsp;·&nbsp; '
                 f'💰 {best.get("SUMA kosztów (PLN)", best["Koszt paliwa (PLN)"])} PLN</p></div>',
