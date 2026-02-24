@@ -1067,6 +1067,21 @@ def main():
         maszyny_male_df = load_maszyny("LISTA_MASZYN_MALE")
         maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE")
 
+    # DEBUG: tymczasowe info o maszynach
+    with st.expander("🔍 DEBUG: dane maszyn (usuń po testach)", expanded=False):
+        st.write(f"**LISTA_MASZYN_MALE**: {len(maszyny_male_df)} wierszy")
+        if not maszyny_male_df.empty:
+            st.dataframe(maszyny_male_df.head(20))
+        else:
+            st.warning("Pusta!")
+        st.write(f"**LISTA_MASZYN_DUZE**: {len(maszyny_duze_df)} wierszy")
+        if not maszyny_duze_df.empty:
+            st.dataframe(maszyny_duze_df.head(20))
+        else:
+            st.warning("Pusta!")
+        if not budowy_df.empty:
+            st.write("**KOST budów:**", budowy_df[["nazwa", "kost"]].to_dict("records"))
+
     # Wzbogać budowy o liczbę maszyn
     if not budowy_df.empty and (not maszyny_male_df.empty or not maszyny_duze_df.empty):
         budowy_df[["maszyny_male", "maszyny_duze"]] = budowy_df["kost"].apply(
