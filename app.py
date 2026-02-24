@@ -44,6 +44,8 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CACHE_PATH = os.path.join(BASE_DIR, "cache_mechanicy.csv")
 OSRM_BASE = "http://router.project-osrm.org/route/v1/driving"
 NOMINATIM_USER_AGENT = "logistyka_budowlana_app_v1"
+STAWKA_RBH_MECHANIKA = 150  # PLN za godzinę
+STAWKA_SAMOCHODU = 45       # PLN za godzinę
 
 # ── Google Sheets ─────────────────────────────────────────────────────────────
 GSHEET_ID = "1yLzRB0v3Um6W4owIQt9-MfL320AxLVl7oY-lfPv7Kug"
@@ -1067,21 +1069,6 @@ def main():
         maszyny_male_df = load_maszyny("LISTA_MASZYN_MALE")
         maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE")
 
-    # DEBUG: tymczasowe info o maszynach
-    with st.expander("🔍 DEBUG: dane maszyn (usuń po testach)", expanded=False):
-        st.write(f"**LISTA_MASZYN_MALE**: {len(maszyny_male_df)} wierszy")
-        if not maszyny_male_df.empty:
-            st.dataframe(maszyny_male_df.head(20))
-        else:
-            st.warning("Pusta!")
-        st.write(f"**LISTA_MASZYN_DUZE**: {len(maszyny_duze_df)} wierszy")
-        if not maszyny_duze_df.empty:
-            st.dataframe(maszyny_duze_df.head(20))
-        else:
-            st.warning("Pusta!")
-        if not budowy_df.empty:
-            st.write("**KOST budów:**", budowy_df[["nazwa", "kost"]].to_dict("records"))
-
     # Wzbogać budowy o liczbę maszyn
     if not budowy_df.empty and (not maszyny_male_df.empty or not maszyny_duze_df.empty):
         budowy_df[["maszyny_male", "maszyny_duze"]] = budowy_df["kost"].apply(
@@ -1346,12 +1333,18 @@ def main():
             )
             if dist_km is not None:
                 koszt = round(dist_km * koszt_za_km, 2)
+                h_ceil = math.ceil(dur_min / 30) * 0.5  # zaokr. w górę do 0.5h
+                koszt_rbh = round(h_ceil * STAWKA_RBH_MECHANIKA, 2)
+                koszt_sam = round(h_ceil * STAWKA_SAMOCHODU, 2)
                 results.append({
                     "Mechanik": mech["mechanik"],
                     "Warsztat": mech["warsztat"],
                     "Dystans (km)": dist_km,
                     "Czas (min)": dur_min,
                     "Koszt paliwa (PLN)": koszt,
+                    f"Rbh mechanika [{STAWKA_RBH_MECHANIKA:.0f} PLN/h]": koszt_rbh,
+                    f"Koszt samochodu [{STAWKA_SAMOCHODU:.0f} PLN/h]": koszt_sam,
+                    "SUMA kosztów (PLN)": round(koszt + koszt_rbh + koszt_sam, 2),
                     "_polyline": polyline,
                     "_is_workshop": False,
                 })
@@ -1367,12 +1360,18 @@ def main():
             )
             if dist_km is not None:
                 koszt = round(dist_km * koszt_za_km, 2)
+                h_ceil = math.ceil(dur_min / 30) * 0.5
+                koszt_rbh = round(h_ceil * STAWKA_RBH_MECHANIKA, 2)
+                koszt_sam = round(h_ceil * STAWKA_SAMOCHODU, 2)
                 results.append({
                     "Mechanik": f"🔧 {ws['nazwa']}",
                     "Warsztat": ws["nazwa"],
                     "Dystans (km)": dist_km,
                     "Czas (min)": dur_min,
                     "Koszt paliwa (PLN)": koszt,
+                    f"Rbh mechanika [{STAWKA_RBH_MECHANIKA:.0f} PLN/h]": koszt_rbh,
+                    f"Koszt samochodu [{STAWKA_SAMOCHODU:.0f} PLN/h]": koszt_sam,
+                    "SUMA kosztów (PLN)": round(koszt + koszt_rbh + koszt_sam, 2),
                     "_polyline": polyline,
                     "_is_workshop": True,
                 })
@@ -1414,7 +1413,7 @@ def main():
     analysis_target = st.session_state.get("analysis_target", None)
 
     # ── Layout: Mapa + Tabela ────────────────────────────────────────────
-    col_map, col_table = st.columns([3, 2])
+    col_map, col_table = st.columns([2, 3])
 
     with col_map:
         # Nagłówek mapy + wybór stylu + filtry warstw
@@ -1454,7 +1453,7 @@ def main():
             all_mechanicy_df=mechanicy_df,
         )
         # Kliknięcie na budowę → automatycznie ustawia cel
-        st_folium(fmap, use_container_width=True, height=580, returned_objects=[])
+        st_folium(fmap, use_container_width=True, height=650, returned_objects=[])
 
         # Legenda tras (pod mapą)
         if routes_for_map:
@@ -1493,7 +1492,7 @@ def main():
                 f'<p><b>{best["Mechanik"]}</b> ({best["Warsztat"]})<br>'
                 f'📏 {best["Dystans (km)"]} km &nbsp;·&nbsp; '
                 f'⏱️ {best["Czas (min)"]} min &nbsp;·&nbsp; '
-                f'💰 {best["Koszt paliwa (PLN)"]} PLN</p></div>',
+                f'💰 {best.get("SUMA kosztów (PLN)", best["Koszt paliwa (PLN)"])} PLN</p></div>',
                 unsafe_allow_html=True,
             )
 
@@ -1501,7 +1500,9 @@ def main():
             fmt_df = display_df.copy()
             fmt_df["Dystans (km)"] = fmt_df["Dystans (km)"].apply(lambda x: f"{x:.1f}")
             fmt_df["Czas (min)"] = fmt_df["Czas (min)"].apply(lambda x: f"{x:.1f}")
-            fmt_df["Koszt paliwa (PLN)"] = fmt_df["Koszt paliwa (PLN)"].apply(lambda x: f"{x:.2f}")
+            for money_col in fmt_df.columns:
+                if "PLN" in str(money_col) or "SUMA" in str(money_col):
+                    fmt_df[money_col] = fmt_df[money_col].apply(lambda x: f"{x:.2f}" if isinstance(x, (int, float)) else x)
             st.markdown(_render_table(fmt_df, highlight_row=0, workshop_flags=ws_flags), unsafe_allow_html=True)
 
             # Eksport CSV
