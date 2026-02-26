@@ -844,44 +844,43 @@ def main():
         unsafe_allow_html=True,
     )
 
-    # ── Przycisk pomocy (?) — stały w prawym dolnym rogu ─────────────────
+
+    # ── Przycisk pomocy (?) — lewy górny róg (pure CSS, bez JS) ──────────
     st.markdown("""
     <style>
-        .help-btn {
-            position: fixed; bottom: 20px; right: 20px; z-index: 9999;
-            width: 40px; height: 40px; border-radius: 50%;
+        .help-toggle { display: none; }
+        .help-btn-label {
+            position: fixed; top: 12px; left: 12px; z-index: 9999;
+            width: 36px; height: 36px; border-radius: 50%;
             background: linear-gradient(135deg, #1e3a5f, #2563eb);
-            color: white; font-size: 1.3rem; font-weight: 700;
+            color: white; font-size: 1.2rem; font-weight: 700;
             border: 2px solid rgba(255,255,255,0.2);
             cursor: pointer; display: flex; align-items: center; justify-content: center;
             box-shadow: 0 4px 16px rgba(0,0,0,0.3);
             transition: transform 0.2s, box-shadow 0.2s;
+            user-select: none;
         }
-        .help-btn:hover { transform: scale(1.1); box-shadow: 0 6px 24px rgba(0,0,0,0.4); }
-        .help-popup {
-            display: none; position: fixed; bottom: 70px; right: 20px; z-index: 10000;
+        .help-btn-label:hover { transform: scale(1.1); box-shadow: 0 6px 24px rgba(0,0,0,0.4); }
+        .help-popup-box {
+            display: none; position: fixed; top: 56px; left: 12px; z-index: 10000;
             background: #1e293b; border: 1px solid rgba(148,163,184,0.2);
-            border-radius: 12px; padding: 1.2rem 1.4rem; min-width: 300px;
+            border-radius: 12px; padding: 1.2rem 1.4rem; min-width: 300px; max-width: 360px;
             box-shadow: 0 8px 32px rgba(0,0,0,0.4); color: #e2e8f0;
         }
-        .help-popup.show { display: block; }
-        .help-popup h4 { margin: 0 0 0.5rem 0; color: #60a5fa; }
-        .help-popup p { margin: 0.3rem 0; font-size: 0.9rem; color: #cbd5e1; }
-        .help-popup a { color: #60a5fa; text-decoration: none; }
-        .help-popup a:hover { text-decoration: underline; }
-        .help-close {
-            position: absolute; top: 8px; right: 12px; background: none;
-            border: none; color: #94a3b8; font-size: 1.2rem; cursor: pointer;
-        }
-        .help-close:hover { color: #e2e8f0; }
+        .help-toggle:checked ~ .help-popup-box { display: block; }
+        .help-toggle:checked ~ .help-btn-label { background: #2563eb; }
+        .help-popup-box h4 { margin: 0 0 0.5rem 0; color: #60a5fa; }
+        .help-popup-box p { margin: 0.3rem 0; font-size: 0.9rem; color: #cbd5e1; }
+        .help-popup-box a { color: #60a5fa; text-decoration: none; }
+        .help-popup-box a:hover { text-decoration: underline; }
     </style>
-    <div class="help-popup" id="helpPopup">
-        <button class="help-close" onclick="document.getElementById('helpPopup').classList.remove('show')">✕</button>
+    <input type="checkbox" class="help-toggle" id="helpToggle">
+    <label class="help-btn-label" for="helpToggle">?</label>
+    <div class="help-popup-box">
         <h4>ℹ️ Pomoc</h4>
         <p>W przypadku problemów z działaniem, aktualizacją aplikacji lub jej bazą danych proszę o kontakt:</p>
         <p>📧 <a href="mailto:jakub.cabel@strabag.com">jakub.cabel@strabag.com</a></p>
     </div>
-    <div class="help-btn" onclick="var p=document.getElementById('helpPopup'); p.classList.toggle('show');">?</div>
     """, unsafe_allow_html=True)
 
     # 🌙 Tryb ciemny/jasny
