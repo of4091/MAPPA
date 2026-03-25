@@ -41,19 +41,46 @@ warnings.filterwarnings("ignore")
 APP_TITLE = "MAPPA — Kalkulator dojazdów mechaników"
 APP_ICON = "🏗️"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-CACHE_PATH = os.path.join(BASE_DIR, "cache_mechanicy.csv")
 OSRM_BASE = "http://router.project-osrm.org/route/v1/driving"
 NOMINATIM_USER_AGENT = "logistyka_budowlana_app_v1"
 STAWKA_RBH_MECHANIKA = 150  # PLN za godzinę
 STAWKA_SAMOCHODU = 45       # PLN za godzinę
 
-# ── Google Sheets ─────────────────────────────────────────────────────────────
-GSHEET_ID = "1yLzRB0v3Um6W4owIQt9-MfL320AxLVl7oY-lfPv7Kug"
-APP_PASSWORD = "BE_13!WE"
+# ── Konfiguracja regionów ─────────────────────────────────────────────────────
+REGIONS = {
+    "🏔️ Południe": {
+        "gsheet_id": "1yLzRB0v3Um6W4owIQt9-MfL320AxLVl7oY-lfPv7Kug",
+        "password": "BE_13!WE",
+        "color_from": "#0f172a",
+        "color_to": "#1e3a5f",
+        "cache_suffix": "poludnie",
+    },
+    "🌅 Zachód": {
+        "gsheet_id": "1DqKMG78XjNeMfMAgkrUxNRHVUKVhc2IWrMDEgDeQLds",
+        "password": "BE_13!WE",
+        "color_from": "#2d1b4e",
+        "color_to": "#5f1e3a",
+        "cache_suffix": "zachod",
+    },
+    "🌄 Wschód": {
+        "gsheet_id": "1lSXB5YB-p1MJvImX3HqVHlPT_SMX-l45kmAp1cXLjs0",
+        "password": "BE_13!WE",
+        "color_from": "#1b3d2f",
+        "color_to": "#3a5f1e",
+        "cache_suffix": "wschod",
+    },
+}
 
-def gsheet_csv_url(sheet_name: str) -> str:
+def get_cache_path(region_key: str) -> str:
+    """Zwróć ścieżkę do cache geokodowania dla danego regionu."""
+    suffix = REGIONS[region_key]["cache_suffix"]
+    return os.path.join(BASE_DIR, f"cache_mechanicy_{suffix}.csv")
+
+def gsheet_csv_url(sheet_name: str, gsheet_id: str = None) -> str:
     """URL do pobrania arkusza Google Sheets jako CSV."""
-    return f"https://docs.google.com/spreadsheets/d/{GSHEET_ID}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
+    if gsheet_id is None:
+        gsheet_id = REGIONS[list(REGIONS.keys())[0]]["gsheet_id"]
+    return f"https://docs.google.com/spreadsheets/d/{gsheet_id}/gviz/tq?tqx=out:csv&sheet={sheet_name}"
 
 # ── Konfiguracja strony ─────────────────────────────────────────────────────
 st.set_page_config(
@@ -183,12 +210,15 @@ st.markdown("""
 
 
 # ── Cache geokodowania ───────────────────────────────────────────────────────
-def load_geocode_cache() -> dict:
+def load_geocode_cache(cache_path: str = None) -> dict:
     """Wczytaj cache adresów → współrzędnych z CSV."""
+    if cache_path is None:
+        region = st.session_state.get("region", list(REGIONS.keys())[0])
+        cache_path = get_cache_path(region)
     cache = {}
-    if os.path.exists(CACHE_PATH):
+    if os.path.exists(cache_path):
         try:
-            with open(CACHE_PATH, "r", encoding="utf-8") as f:
+            with open(cache_path, "r", encoding="utf-8") as f:
                 reader = csv.DictReader(f)
                 for row in reader:
                     cache[row["adres"]] = (float(row["lat"]), float(row["lon"]))
@@ -197,10 +227,13 @@ def load_geocode_cache() -> dict:
     return cache
 
 
-def save_geocode_cache(cache: dict) -> None:
+def save_geocode_cache(cache: dict, cache_path: str = None) -> None:
     """Zapisz cache do CSV (nadpisz całość)."""
+    if cache_path is None:
+        region = st.session_state.get("region", list(REGIONS.keys())[0])
+        cache_path = get_cache_path(region)
     try:
-        with open(CACHE_PATH, "w", encoding="utf-8", newline="") as f:
+        with open(cache_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.DictWriter(f, fieldnames=["adres", "lat", "lon"])
             writer.writeheader()
             for adres, (lat, lon) in cache.items():
@@ -227,10 +260,10 @@ def geocode_address(address: str, geolocator, cache: dict) -> tuple:
 
 # ── Ładowanie danych ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=300)
-def load_budowy() -> pd.DataFrame:
+def load_budowy(gsheet_id: str = None) -> pd.DataFrame:
     """Wczytaj arkusz BUDOWY z Google Sheets — parsuj kolumnę WSPÓŁRZĘDNE."""
     try:
-        url = gsheet_csv_url("BUDOWY")
+        url = gsheet_csv_url("BUDOWY", gsheet_id)
         df = pd.read_csv(url)
     except Exception as e:
         st.error(f"❌ Nie można wczytać arkusza BUDOWY: {e}")
@@ -274,10 +307,10 @@ def load_budowy() -> pd.DataFrame:
 
 
 @st.cache_data(show_spinner=False, ttl=300)
-def load_warsztaty() -> pd.DataFrame:
+def load_warsztaty(gsheet_id: str = None) -> pd.DataFrame:
     """Wczytaj arkusz WARSZTATY z Google Sheets."""
     try:
-        url = gsheet_csv_url("WARSZTATY")
+        url = gsheet_csv_url("WARSZTATY", gsheet_id)
         df = pd.read_csv(url)
     except Exception:
         return pd.DataFrame()
@@ -325,10 +358,10 @@ def load_warsztaty() -> pd.DataFrame:
 
 # ── Ładowanie maszyn ─────────────────────────────────────────────────────────
 @st.cache_data(show_spinner=False, ttl=300)
-def load_maszyny(sheet_name: str) -> pd.DataFrame:
+def load_maszyny(sheet_name: str, gsheet_id: str = None) -> pd.DataFrame:
     """Wczytaj listę maszyn z Google Sheets. Zwraca DataFrame z kolumnami KOST, nazwa_kost, ilosc."""
     try:
-        url = gsheet_csv_url(sheet_name)
+        url = gsheet_csv_url(sheet_name, gsheet_id)
         df = pd.read_csv(url)
     except Exception:
         return pd.DataFrame(columns=["KOST", "nazwa_kost", "ilosc"])
@@ -417,10 +450,10 @@ def count_machines_for_budowa(kost_str, maszyny_male_df, maszyny_duze_df):
     return male, duze
 
 
-def load_mechanicy() -> pd.DataFrame:
+def load_mechanicy(gsheet_id: str = None) -> pd.DataFrame:
     """Wczytaj arkusz MECHANICY z Google Sheets — geokoduj z cache."""
     try:
-        url = gsheet_csv_url("MECHANICY")
+        url = gsheet_csv_url("MECHANICY", gsheet_id)
         df = pd.read_csv(url)
     except Exception as e:
         st.error(f"❌ Nie można wczytać arkusza MECHANICY: {e}")
@@ -806,20 +839,34 @@ def build_map(mechanicy_df, budowy_df, warsztaty_df,
 #  APLIKACJA GŁÓWNA
 # ══════════════════════════════════════════════════════════════════════════════
 def main():
-    # ── Bramka hasła ──────────────────────────────────────────────────────
+    # ── Bramka hasła + wybór regionu ──────────────────────────────────────
     if "authenticated" not in st.session_state:
         st.session_state["authenticated"] = False
 
     if not st.session_state["authenticated"]:
         st.markdown("## 🔐 MAPPA — Logowanie")
+        region_names = list(REGIONS.keys())
+        selected_region = st.selectbox(
+            "🌍 Wybierz region:",
+            options=region_names,
+            index=0,
+            key="login_region",
+        )
         pwd = st.text_input("Hasło:", type="password", key="login_pwd")
         if st.button("Zaloguj"):
-            if pwd == APP_PASSWORD:
+            expected_pwd = REGIONS[selected_region]["password"]
+            if pwd == expected_pwd:
                 st.session_state["authenticated"] = True
+                st.session_state["region"] = selected_region
                 st.rerun()
             else:
                 st.error("❌ Nieprawidłowe hasło.")
         st.stop()
+
+    # ── Aktywny region ───────────────────────────────────────────────────
+    current_region = st.session_state.get("region", list(REGIONS.keys())[0])
+    region_config = REGIONS[current_region]
+    active_gsheet_id = region_config["gsheet_id"]
 
     # ── Nagłówek ─────────────────────────────────────────────────────────
     # Ładowanie obrazów jako base64
@@ -833,10 +880,16 @@ def main():
     _kask_b64 = _img_b64("kask.png")
     _pojazd_b64 = _img_b64("pojazd.png")
 
+    _hdr_color_from = region_config["color_from"]
+    _hdr_color_to = region_config["color_to"]
+    # Wyczyść emoji z nazwy regionu do wyświetlenia
+    _region_label = current_region
+
     st.markdown(
-        '<div class="main-header" style="position:relative;">'
-        '<h1>🌍 MAPPA 🚚</h1>'
-        '<p>Kalkulator dojazdów mechaników</p>'
+        f'<div class="main-header" style="position:relative; '
+        f'background: linear-gradient(135deg, {_hdr_color_from} 0%, {_hdr_color_to} 50%, #1e293b 100%) !important;">'
+        f'<h1>🌍 MAPPA 🚚</h1>'
+        f'<p>Kalkulator dojazdów mechaników · <b>{_region_label}</b></p>'
         f'<img src="data:image/png;base64,{_kask_b64}" '
         'style="position:absolute; right:20px; top:50%; transform:translateY(-50%); '
         'height:150px; object-fit:contain;" />'
@@ -1096,16 +1149,16 @@ def main():
         html += '</tbody></table></div>'
         return html
 
-    # ── Ładowanie danych z Google Sheets ────────────────────────────────
+    # ── Ładowanie danych z Google Sheets (region: {current_region}) ─────
     with st.spinner("📂 Wczytywanie budów…"):
-        budowy_df = load_budowy()
+        budowy_df = load_budowy(active_gsheet_id)
 
     with st.spinner("📂 Wczytywanie warsztatów…"):
-        warsztaty_df = load_warsztaty()
+        warsztaty_df = load_warsztaty(active_gsheet_id)
 
     with st.spinner("📂 Wczytywanie list maszyn…"):
-        maszyny_male_df = load_maszyny("LISTA_MASZYN_MALE").copy()
-        maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE").copy()
+        maszyny_male_df = load_maszyny("LISTA_MASZYN_MALE", active_gsheet_id).copy()
+        maszyny_duze_df = load_maszyny("LISTA_MASZYN_DUZE", active_gsheet_id).copy()
 
     # ── Cross-referencja: uzupełnij puste KOST w DUZE na podstawie MALE ──
     # DUZE sheet ma wiele wierszy z pustym KOST ale z "Ostatnie: Nazwa KOST"
@@ -1167,7 +1220,7 @@ def main():
 
     if "mechanicy_df" not in st.session_state:
         with st.spinner("📂 Wczytywanie i geokodowanie mechaników…"):
-            st.session_state["mechanicy_df"] = load_mechanicy()
+            st.session_state["mechanicy_df"] = load_mechanicy(active_gsheet_id)
 
     mechanicy_df = st.session_state["mechanicy_df"]
 
@@ -1305,11 +1358,19 @@ def main():
 
         # 🔄 Odśwież dane (na dole)
         if st.button("🔄 Odśwież dane", use_container_width=True,
-                     help="Wyczyść cache i wczytaj dane ponownie z Excela."):
+                     help="Wyczyść cache i wczytaj dane ponownie z Google Sheets."):
             st.cache_data.clear()
             for key in list(st.session_state.keys()):
                 if key.startswith(("mechanicy_df", "osrm_available", "saved_", "analysis_")):
                     del st.session_state[key]
+            st.rerun()
+
+        # 🔀 Zmiana regionu
+        if st.button("🔀 Zmień region", use_container_width=True,
+                     help="Wyloguj i wróć do wyboru regionu."):
+            st.cache_data.clear()
+            for key in list(st.session_state.keys()):
+                del st.session_state[key]
             st.rerun()
 
         st.markdown("---")
@@ -1688,8 +1749,8 @@ def main():
 
     # ── Stopka centralna ──────────────────────────────────────────────────
     st.markdown(
-        '<p style="text-align:center; font-size:0.75rem; opacity:0.5; margin-top:2rem;">'
-        "MAPPA v3.1 · © 2026</p>",
+        f'<p style="text-align:center; font-size:0.75rem; opacity:0.5; margin-top:2rem;">'
+        f"MAPPA v3.2 · {_region_label} · © 2026</p>",
         unsafe_allow_html=True,
     )
 
